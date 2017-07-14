@@ -1,44 +1,56 @@
-var EventEmitter = require('events').EventEmitter;
-var constants = require('./constants');
-var stdDbusIfaces = require('./stdifaces');
+import EventEmitter from 'events';
+import constants from './constants';
+import stdDbusIfaces from './stdifaces';
+import introspect from './introspect';
 
-module.exports = function bus(conn, opts) {
-    if (!(this instanceof bus)) {
-        return new bus(conn);
+private class SignalMessage {
+    body: any;
+    signature: any;
+    path: any;
+    member: any;
+    interface: any;
+    optional serial: number;
+    type: any;
+
+}
+
+export class Bus {
+
+    private serial=1;
+    private cookies={};
+    private methodCallHandlers = {};
+    private signals = new EventEmitter();
+    private exportedObjects = {};
+
+    constructor(private connection, private opts) {
+        connection.on('message', function (msg) {
+            this.connection_on(msg);
+        });
     }
-    if (!opts) opts = {};
-
-    var self = this;
-    this.connection = conn;
-    this.serial = 1;
-    this.cookies = {}; // TODO: rename to methodReturnHandlers
-    this.methodCallHandlers = {};
-    this.signals = new EventEmitter();
-    this.exportedObjects = {};
 
     // fast access to tree formed from object paths names
     // this.exportedObjectsTree = { root: null, children: {} };
 
-    this.invoke = function (msg, callback) {
+    public invoke(msg, callback) {
         if (!msg.type)
-            msg.type = constants.messageType.methodCall;
-        msg.serial = self.serial;
-        self.serial++;
+            msg.type = constants.MessageType.methodCall;
+        msg.serial = this.serial;
+        this.serial++;
         this.cookies[msg.serial] = callback;
-        self.connection.message(msg);
+        this.connection.message(msg);
     };
 
-    this.invokeDbus = function (msg, callback) {
+    public invokeDbus(msg, callback) {
         if (!msg.path)
             msg.path = '/org/freedesktop/DBus';
         if (!msg.destination)
             msg.destination = 'org.freedesktop.DBus';
         if (!msg['interface'])
             msg['interface'] = 'org.freedesktop.DBus';
-        self.invoke(msg, callback);
+        this.invoke(msg, callback);
     };
 
-    this.mangle = function (path, iface, member) {
+    private mangle(path, iface, member) {
         var obj = {};
         if (typeof path === 'object') // handle one argumant case mangle(msg)
         {
@@ -53,23 +65,22 @@ module.exports = function bus(conn, opts) {
         return JSON.stringify(obj);
     };
 
-    this.sendSignal = function (path, iface, name, signature, args) {
-        var signalMsg = {
-            type: constants.messageType.signal,
-            serial: self.serial,
-            'interface': iface,
-            path: path,
-            member: name
-        };
+    private sendSignal(path, iface, name, signature, args) {
+        let signalMsg = new SignalMessage();
+        signalMsg.type=constants.messageType.signal;
+        signalMsg.serial=this.serial;
+        signalMsg.interface=iface;
+        signalMsg.path=path;
+        signalMsg.member=name;
         if (signature) {
             signalMsg.signature = signature;
             signalMsg.body = args;
         }
-        self.connection.message(signalMsg);
+        this.connection.message(signalMsg);
     }
 
     // Warning: errorName must respect the same rules as interface names (must contain a dot)
-    this.sendError = function (msg, errorName, errorText) {
+    private sendError(msg, errorName, errorText) {
         var reply = {
             type: constants.messageType.error,
             replySerial: msg.serial,
@@ -82,7 +93,7 @@ module.exports = function bus(conn, opts) {
         this.connection.message(reply);
     }
 
-    this.sendReply = function (msg, signature, body) {
+    private sendReply(msg, signature, body) {
         var reply = {
             type: constants.messageType.methodReturn,
             replySerial: msg.serial,
@@ -94,9 +105,9 @@ module.exports = function bus(conn, opts) {
     }
 
     // route reply/error
-    this.connection.on('message', function (msg) {
-        var handler;
-        if (self.exportedObjects!==undefined&& self.exportedObjects[msg.path]) 
+    private connection_on (msg) {
+        let handler =  {};
+        if (this.exportedObjects!==undefined&& this.exportedObjects[msg.path]) 
             { 
                 // methodCall
                 if (stdDbusIfaces(msg, self))
@@ -104,7 +115,7 @@ module.exports = function bus(conn, opts) {
 
                 // exported interfaces handlers
                 var obj, iface, impl;
-                if (obj = self.exportedObjects[msg.path]) {
+                if (obj = this.exportedObjects[msg.path]) {
 
                     if (iface = obj[msg['interface']]) {
                         // now we are ready to serve msg.member
@@ -191,17 +202,17 @@ module.exports = function bus(conn, opts) {
             }  
     });
 
-    this.setMethodCallHandler = function (objectPath, iface, member, handler) {
-        var key = self.mangle(objectPath, iface, member);
-        self.methodCallHandlers[key] = handler;
+    private setMethodCallHandler (objectPath, iface, member, handler) {
+        var key = this.mangle(objectPath, iface, member);
+        this.methodCallHandlers[key] = handler;
     };
 
-    this.exportInterface = function (obj, path, iface) {
+    private exportInterface (obj, path, iface) {
         var entry;
-        if (!self.exportedObjects[path])
-            entry = self.exportedObjects[path] = {};
+        if (!this.exportedObjects[path])
+            entry = this.exportedObjects[path] = {};
         else
-            entry = self.exportedObjects[path];
+            entry = this.exportedObjects[path];
         entry[iface.name] = [iface, obj];
 
         // monkey-patch obj.emit()
@@ -220,7 +231,7 @@ module.exports = function bus(conn, opts) {
                     //console.log(iface.signals, iface.signals[signalName]);
                     var signalMsg = {
                         type: constants.messageType.signal,
-                        serial: self.serial,
+                        serial: this.serial,
                         'interface': iface.name,
                         path: path,
                         member: signalName
@@ -229,8 +240,8 @@ module.exports = function bus(conn, opts) {
                         signalMsg.signature = signal[0];
                         signalMsg.body = args.slice(1);
                     }
-                    self.connection.message(signalMsg);
-                    self.serial++;
+                    this.connection.message(signalMsg);
+                    this.serial++;
                 }
                 // note that local emit is likely to be called before signal arrives
                 // to remote subscriber
@@ -264,7 +275,6 @@ module.exports = function bus(conn, opts) {
         this.getObject = function (name, callback) {
             var obj = new DBusObject(name, this);
             //console.log(obj);
-            var introspect = require('./introspect.js');
             introspect(obj, function (err, ifaces, nodes) {
                 if (err) return callback(err);
                 obj.proxy = ifaces;
